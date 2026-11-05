@@ -24,11 +24,20 @@ st.title("🔍 Build Code Scanner")
 # ========================================================
 
 def norm(text):
-    return re.sub(
-        r'[^A-Z0-9]',
-        '',
+
+    s = re.sub(
+        r"[^A-Z0-9]",
+        "",
         str(text).upper()
     )
+
+    s = (
+        s.replace("O", "0")
+         .replace("I", "1")
+    )
+
+    return s
+
 
 # ========================================================
 # LOAD EXCEL
@@ -58,9 +67,9 @@ uploaded = st.sidebar.file_uploader(
 
 if uploaded:
     df = load_data(uploaded)
-
 else:
     df = load_data("codes.xlsx")
+
 
 # ========================================================
 # COLUMN MAPPING
@@ -68,9 +77,9 @@ else:
 
 cols = list(df.columns)
 
-desc_cols = cols[0:6]
-pos_cols = cols[6:26]
-code_col = cols[26]
+desc_cols = cols[0:6]      # A-F
+pos_cols = cols[6:26]      # G-Z
+code_col = cols[26]        # AA
 
 df["_code"] = df[code_col].apply(norm)
 
@@ -79,6 +88,7 @@ df["_description"] = (
     .astype(str)
     .agg(" | ".join, axis=1)
 )
+
 
 # ========================================================
 # DROPDOWNS
@@ -92,46 +102,52 @@ grid = st.columns(5)
 
 for i, col in enumerate(pos_cols):
 
-    options = [""]
-
-    values = (
-        df[col]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
+    values = sorted(
+        [
+            v
+            for v in df[col]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+            if v
+        ]
     )
 
-    options.extend(sorted(values))
+    options = [""] + values
 
     with grid[i % 5]:
 
         selected[col] = st.selectbox(
-            col,
+            f"Pos {i+1}",
             options,
             key=col
         )
 
+
 # ========================================================
-# FILTER DATA
+# FILTER USING ACTUAL POSITION IN BUILD CODE
 # ========================================================
 
 filtered = df.copy()
 
-for col, value in selected.items():
+for idx, col in enumerate(pos_cols):
+
+    value = selected[col]
 
     if value:
 
         filtered = filtered[
-            filtered[col] == value
+            filtered["_code"].str[idx] == value
         ]
 
+
 # ========================================================
-# SHOW MATCHING CODES
+# SHOW POSSIBLE CODES
 # ========================================================
 
 st.subheader(
-    f"2. Matching Build Codes ({len(filtered)})"
+    f"2. Intended Build Codes ({len(filtered)})"
 )
 
 st.dataframe(
@@ -139,16 +155,16 @@ st.dataframe(
         [code_col, "_description"]
     ].rename(
         columns={
-            "_description":
-            "Description"
+            "_description": "Description"
         }
     ),
     use_container_width=True,
     hide_index=True
 )
 
+
 # ========================================================
-# TARGET CODES
+# BUILD CODE LISTS
 # ========================================================
 
 target_codes = filtered["_code"].tolist()
@@ -166,6 +182,7 @@ photo = st.camera_input(
     "Take Photo"
 )
 
+
 # ========================================================
 # OCR
 # ========================================================
@@ -181,7 +198,7 @@ if photo:
     ocr = RapidOCR()
 
     with st.spinner(
-        "Reading build code..."
+        "Scanning build code..."
     ):
 
         result, _ = ocr(image_np)
@@ -194,15 +211,28 @@ if photo:
 
             clean_text = norm(text)
 
-            # OCR common mistakes
-            clean_text = (
-                clean_text
-                .replace("O", "0")
-                .replace("I", "1")
-                .replace("S", "5")
+            # Build code must be exactly 20 chars
+            if len(clean_text) != 20:
+                continue
+
+            search_pool = (
+                target_codes
+                if len(target_codes) > 0
+                else all_codes
             )
 
-            if len(clean_text) < 18:
+            match = process.extractOne(
+                clean_text,
+                search_pool
+            )
+
+            if not match:
+                continue
+
+            matched_code = match[0]
+            confidence = match[1]
+
+            if confidence < 85:
                 continue
 
             pts = np.array(
@@ -210,64 +240,24 @@ if photo:
                 dtype=np.int32
             )
 
-            x = int(pts[:, 0].min())
-            y = int(pts[:, 1].min())
-
-            match = process.extractOne(
-                clean_text,
-                all_codes
-            )
-
-            color = (0, 0, 255)
-            label = "UNKNOWN"
-
-            if match:
-
-                matched_code = match[0]
-                confidence = match[1]
-
-                if confidence > 75:
-
-                    if matched_code in target_codes:
-
-                        color = (0, 255, 0)
-                        label = matched_code
-
-                        detected_matches.append(
-                            (
-                                matched_code,
-                                confidence
-                            )
-                        )
-
-                    else:
-
-                        color = (0, 165, 255)
-                        label = matched_code
-
+            # GREEN RECTANGLE ONLY
             cv2.polylines(
                 display_img,
                 [pts],
                 True,
-                color,
-                4
+                (0, 255, 0),
+                6
             )
 
-            cv2.putText(
-                display_img,
-                label,
+            detected_matches.append(
                 (
-                    x,
-                    max(25, y - 10)
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                color,
-                2
+                    matched_code,
+                    confidence
+                )
             )
 
     # ====================================================
-    # SHOW IMAGE
+    # IMAGE WITH RECTANGLES
     # ====================================================
 
     st.subheader("Detected Build Codes")
@@ -279,10 +269,8 @@ if photo:
     )
 
     # ====================================================
-    # SHOW MATCHES
+    # RESULTS
     # ====================================================
-
-    st.subheader("Match Results")
 
     shown = set()
 
@@ -302,40 +290,18 @@ if photo:
         ].iloc[0]
 
         st.success(
-            f"Matched Build Code: {matched_code}"
-        )
-
-        st.write(
-            f"Confidence: {confidence:.1f}%"
+            f"Matched Build Code: {matched_code} | Confidence: {confidence:.1f}%"
         )
 
         st.markdown(
             "### Test Configuration"
         )
 
-        st.write(
-            f"Vehicle: {row[desc_cols[0]]}"
-        )
+        for col in desc_cols:
 
-        st.write(
-            f"Front/Rear: {row[desc_cols[1]]}"
-        )
-
-        st.write(
-            f"RH/LH: {row[desc_cols[2]]}"
-        )
-
-        st.write(
-            f"Disc Size: {row[desc_cols[3]]}"
-        )
-
-        st.write(
-            f"Caliper Colour: {row[desc_cols[4]]}"
-        )
-
-        st.write(
-            f"Extra Features: {row[desc_cols[5]]}"
-        )
+            st.write(
+                f"**{col}:** {row[col]}"
+            )
 
         st.info(
             row["_description"]
@@ -346,16 +312,3 @@ if photo:
         st.error(
             "No matching build code found."
         )
-
-    st.markdown("---")
-    st.markdown(
-        """
-        **Colour Legend**
-
-        🟢 Green = Selected build code match
-
-        🟠 Orange = Build code exists but not in current selection
-
-        🔴 Red = Unknown text
-        """
-    )
