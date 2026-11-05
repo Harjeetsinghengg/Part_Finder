@@ -155,6 +155,7 @@ target_codes = filtered["_code"].tolist()
 
 all_codes = df["_code"].tolist()
 
+
 # ========================================================
 # CAMERA
 # ========================================================
@@ -173,12 +174,9 @@ if photo:
 
     image = Image.open(photo)
 
-    st.image(
-        image,
-        caption="Captured Image"
-    )
-
     image_np = np.array(image)
+
+    display_img = image_np.copy()
 
     ocr = RapidOCR()
 
@@ -188,7 +186,7 @@ if photo:
 
         result, _ = ocr(image_np)
 
-    detected = []
+    detected_matches = []
 
     if result:
 
@@ -196,99 +194,168 @@ if photo:
 
             clean_text = norm(text)
 
-            if len(clean_text) >= 10:
+            # OCR common mistakes
+            clean_text = (
+                clean_text
+                .replace("O", "0")
+                .replace("I", "1")
+                .replace("S", "5")
+            )
 
-                detected.append(clean_text)
+            if len(clean_text) < 18:
+                continue
 
-    st.subheader("Detected Text")
+            pts = np.array(
+                box,
+                dtype=np.int32
+            )
 
-    if detected:
+            x = int(pts[:, 0].min())
+            y = int(pts[:, 1].min())
 
-        for txt in detected:
+            match = process.extractOne(
+                clean_text,
+                all_codes
+            )
 
-            st.write(txt)
+            color = (0, 0, 255)
+            label = "UNKNOWN"
 
-    else:
+            if match:
 
-        st.warning(
-            "No build code detected."
-        )
+                matched_code = match[0]
+                confidence = match[1]
+
+                if confidence > 75:
+
+                    if matched_code in target_codes:
+
+                        color = (0, 255, 0)
+                        label = matched_code
+
+                        detected_matches.append(
+                            (
+                                matched_code,
+                                confidence
+                            )
+                        )
+
+                    else:
+
+                        color = (0, 165, 255)
+                        label = matched_code
+
+            cv2.polylines(
+                display_img,
+                [pts],
+                True,
+                color,
+                4
+            )
+
+            cv2.putText(
+                display_img,
+                label,
+                (
+                    x,
+                    max(25, y - 10)
+                ),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color,
+                2
+            )
 
     # ====================================================
-    # FIND BEST MATCH
+    # SHOW IMAGE
     # ====================================================
 
-    st.subheader("Best Match")
+    st.subheader("Detected Build Codes")
 
-    best_match_found = False
-
-    search_pool = (
-        target_codes
-        if len(target_codes) > 0
-        else all_codes
+    st.image(
+        display_img,
+        channels="RGB",
+        use_container_width=True
     )
 
-    for text in detected:
+    # ====================================================
+    # SHOW MATCHES
+    # ====================================================
 
-        match = process.extractOne(
-            text,
-            search_pool
+    st.subheader("Match Results")
+
+    shown = set()
+
+    found_match = False
+
+    for matched_code, confidence in detected_matches:
+
+        if matched_code in shown:
+            continue
+
+        shown.add(matched_code)
+
+        found_match = True
+
+        row = df[
+            df["_code"] == matched_code
+        ].iloc[0]
+
+        st.success(
+            f"Matched Build Code: {matched_code}"
         )
 
-        if match:
+        st.write(
+            f"Confidence: {confidence:.1f}%"
+        )
 
-            matched_code = match[0]
-            confidence = match[1]
+        st.markdown(
+            "### Test Configuration"
+        )
 
-            if confidence > 75:
+        st.write(
+            f"Vehicle: {row[desc_cols[0]]}"
+        )
 
-                best_match_found = True
+        st.write(
+            f"Front/Rear: {row[desc_cols[1]]}"
+        )
 
-                st.success(
-                    f"Matched Build Code: {matched_code}"
-                )
+        st.write(
+            f"RH/LH: {row[desc_cols[2]]}"
+        )
 
-                st.write(
-                    f"Confidence: {confidence:.1f}%"
-                )
+        st.write(
+            f"Disc Size: {row[desc_cols[3]]}"
+        )
 
-                row = df[
-                    df["_code"]
-                    == matched_code
-                ].iloc[0]
+        st.write(
+            f"Caliper Colour: {row[desc_cols[4]]}"
+        )
 
-                st.markdown("### Test Configuration")
+        st.write(
+            f"Extra Features: {row[desc_cols[5]]}"
+        )
 
-                st.write(
-                    f"Vehicle: {row[desc_cols[0]]}"
-                )
+        st.info(
+            row["_description"]
+        )
 
-                st.write(
-                    f"Front/Rear: {row[desc_cols[1]]}"
-                )
-
-                st.write(
-                    f"RH/LH: {row[desc_cols[2]]}"
-                )
-
-                st.write(
-                    f"Disc Size: {row[desc_cols[3]]}"
-                )
-
-                st.write(
-                    f"Caliper Colour: {row[desc_cols[4]]}"
-                )
-
-                st.write(
-                    f"Extra Features: {row[desc_cols[5]]}"
-                )
-
-                st.info(
-                    row["_description"]
-                )
-
-    if not best_match_found:
+    if not found_match:
 
         st.error(
             "No matching build code found."
         )
+
+    st.markdown("---")
+    st.markdown(
+        """
+        **Colour Legend**
+
+        🟢 Green = Selected build code match
+
+        🟠 Orange = Build code exists but not in current selection
+
+        🔴 Red = Unknown text
+        """
+    )
