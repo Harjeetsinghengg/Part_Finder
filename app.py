@@ -171,8 +171,8 @@ if photo:
         if ok:
             hits[f] = min(errs, hits.get(f, 99))
             cv2.polylines(display, [pts], True, (0, 0, 200), 6)
-            cv2.putText(display, df.loc[fold_to_row[f], "_code"], (x, max(25, y - 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, font, (0, 200, 0), 2)
+            # cv2.putText(display, df.loc[fold_to_row[f], "_code"], (x, max(25, y - 8)),
+            #            cv2.FONT_HERSHEY_SIMPLEX, font, (0, 200, 0), 2)
         else:
             seen_other = True
             if show_other:
