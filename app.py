@@ -76,11 +76,13 @@ df["_desc"] = df[desc_cols].apply(
 # ====================================================== dropdowns
 st.subheader("1. Select build code characters (leave blank = any)")
 selected = {}
-grid = st.columns(5)
-for i in range(CODE_LEN):
-    values = sorted({c[i] for c in df["_code"] if len(c) > i})
-    with grid[i % 5]:
-        selected[i] = st.selectbox(f"Pos {i + 1}", [""] + values, key=f"pos_{i}")
+PER_ROW = 5
+for start in range(0, CODE_LEN, PER_ROW):
+    row_cols = st.columns(PER_ROW)          # a new row of columns for each group
+    for j, i in enumerate(range(start, min(start + PER_ROW, CODE_LEN))):
+        values = sorted({c[i] for c in df["_code"] if len(c) > i})
+        with row_cols[j]:
+            selected[i] = st.selectbox(f"Pos {i + 1}", [""] + values, key=f"pos_{i}")
 
 any_selected = any(selected.values())
 
