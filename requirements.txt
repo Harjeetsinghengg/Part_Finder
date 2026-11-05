@@ -1,0 +1,9 @@
+streamlit
+streamlit-webrtc
+pandas
+openpyxl
+numpy
+opencv-python-headless
+av
+pyzbar
+rapidocr-onnxruntime
