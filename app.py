@@ -1,175 +1,294 @@
 import re
-import threading
-import time
-import difflib
-
-import av
 import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
-try:
-    from pyzbar import pyzbar
-except Exception:
-    pyzbar = None
+from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
+from rapidfuzz import process
 
-st.set_page_config(page_title="Build Code Scanner", layout="wide")
+# ========================================================
+# PAGE
+# ========================================================
 
-# ------------------------------------------------------------------ data
-@st.cache_data
-def load_data(file):
-    df = pd.read_excel(file, dtype=str).fillna("")
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
-
-
-def norm(s: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", str(s).upper())
-
+st.set_page_config(
+    page_title="Build Code Scanner",
+    layout="wide"
+)
 
 st.title("🔍 Build Code Scanner")
 
-uploaded = st.sidebar.file_uploader("Excel file (optional)", type=["xlsx"])
-df = load_data(uploaded if uploaded else "codes.xlsx")
+# ========================================================
+# HELPERS
+# ========================================================
+
+def norm(text):
+    return re.sub(
+        r'[^A-Z0-9]',
+        '',
+        str(text).upper()
+    )
+
+# ========================================================
+# LOAD EXCEL
+# ========================================================
+
+@st.cache_data
+def load_data(file):
+
+    df = pd.read_excel(
+        file,
+        dtype=str,
+        engine="openpyxl"
+    ).fillna("")
+
+    df.columns = [
+        str(c).strip()
+        for c in df.columns
+    ]
+
+    return df
+
+
+uploaded = st.sidebar.file_uploader(
+    "Excel File",
+    type=["xlsx"]
+)
+
+if uploaded:
+    df = load_data(uploaded)
+
+else:
+    df = load_data("codes.xlsx")
+
+# ========================================================
+# COLUMN MAPPING
+# ========================================================
 
 cols = list(df.columns)
-desc_cols = cols[0:6]        # A..F  -> description
-pos_cols = cols[6:26]        # G..Z  -> character positions 1..20
-code_col = cols[26]          # AA    -> full code
 
-df["_code"] = df[code_col].map(norm)
-df["_desc"] = df[desc_cols].apply(
-    lambda r: " | ".join(v.strip() for v in r if v.strip()), axis=1
+desc_cols = cols[0:6]
+pos_cols = cols[6:26]
+code_col = cols[26]
+
+df["_code"] = df[code_col].apply(norm)
+
+df["_description"] = (
+    df[desc_cols]
+    .astype(str)
+    .agg(" | ".join, axis=1)
 )
 
-# ------------------------------------------------------------ selections
-st.subheader("1. Choose characters (leave blank for any)")
+# ========================================================
+# DROPDOWNS
+# ========================================================
+
+st.subheader("1. Select Build Code Characters")
+
 selected = {}
+
 grid = st.columns(5)
-for i, c in enumerate(pos_cols):
-    options = [""] + sorted(v for v in df[c].unique() if v != "")
+
+for i, col in enumerate(pos_cols):
+
+    options = [""]
+
+    values = (
+        df[col]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    options.extend(sorted(values))
+
     with grid[i % 5]:
-        selected[c] = st.selectbox(f"Position {c}", options, key=f"sel_{c}")
 
-mask = pd.Series(True, index=df.index)
-for c, v in selected.items():
-    if v:
-        mask &= df[c] == v
-filtered = df[mask]
+        selected[col] = st.selectbox(
+            col,
+            options,
+            key=col
+        )
 
-st.subheader(f"2. Intended build codes ({len(filtered)})")
-st.dataframe(filtered[[code_col, "_desc"]].rename(columns={"_desc": "Description"}),
-             use_container_width=True, hide_index=True)
+# ========================================================
+# FILTER DATA
+# ========================================================
 
-target = dict(zip(filtered["_code"], filtered["_desc"]))   # selected
-known = dict(zip(df["_code"], df["_desc"]))                # everything
+filtered = df.copy()
 
-# --------------------------------------------------------------- scanner
-class Scanner(VideoProcessorBase):
-    def __init__(self):
-        self.ocr = RapidOCR()
-        self.lock = threading.Lock()
-        self.target, self.known = {}, {}
-        self.latest = None
-        self.dets = []          # (box, code, ok, timestamp)
-        self.found = {}         # code -> description (selected only)
-        self.running = True
-        threading.Thread(target=self.worker, daemon=True).start()
+for col, value in selected.items():
 
-    def update(self, target, known):
-        with self.lock:
-            self.target, self.known = target, known
+    if value:
 
-    def match(self, text):
-        t = norm(text)
-        with self.lock:
-            known, target = dict(self.known), dict(self.target)
-        for code in known:
-            if code and code in t:
-                return code, code in target
-        if len(t) >= 16:
-            for code in known:
-                if code and difflib.SequenceMatcher(None, t, code).ratio() >= 0.9:
-                    return code, code in target
-        return None, False
+        filtered = filtered[
+            filtered[col] == value
+        ]
 
-    def worker(self):
-        while self.running:
-            frame = self.latest
-            if frame is None:
-                time.sleep(0.05)
-                continue
-            self.latest = None
-            h, w = frame.shape[:2]
-            scale = 960 / max(h, w) if max(h, w) > 960 else 1.0
-            small = cv2.resize(frame, None, fx=scale, fy=scale) if scale != 1 else frame
-            new = []
-            try:  # barcodes
-                if pyzbar:
-                    for b in pyzbar.decode(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)):
-                        code, ok = self.match(b.data.decode(errors="ignore"))
-                        if code:
-                            x, y, bw, bh = b.rect
-                            box = np.array([[x, y], [x + bw, y], [x + bw, y + bh], [x, y + bh]]) / scale
-                            new.append((box.astype(int), code, ok, time.time()))
-                res, _ = self.ocr(small)   # printed text
-                for box, text, _score in (res or []):
-                    code, ok = self.match(text)
-                    if code:
-                        new.append((np.array(box) / scale, code, ok, time.time()))
-            except Exception:
-                pass
-            with self.lock:
-                self.dets = new
-                for _, code, ok, _t in new:
-                    if ok:
-                        self.found[code] = self.target.get(code, "")
+# ========================================================
+# SHOW MATCHING CODES
+# ========================================================
 
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        self.latest = img.copy()
-        with self.lock:
-            dets = [d for d in self.dets if time.time() - d[3] < 1.5]
-            known = dict(self.known)
-        for box, code, ok, _ in dets:
-            color = (0, 200, 0) if ok else (0, 0, 255)
-            pts = np.array(box, dtype=np.int32).reshape(-1, 1, 2)
-            cv2.polylines(img, [pts], True, color, 3)
-            x, y = int(pts[:, 0, 0].min()), int(pts[:, 0, 1].min())
-            label = known.get(code, "") if ok else "NOT SELECTED"
-            cv2.putText(img, label[:60], (x, max(20, y - 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-    def on_ended(self):
-        self.running = False
-
-
-st.subheader("3. Scan")
-st.caption("Press START and allow camera access. Hold the label steady about 15-30 cm away.")
-
-ctx = webrtc_streamer(
-    key="scanner",
-    video_processor_factory=Scanner,
-    media_stream_constraints={"video": {"facingMode": "environment",
-                                        "width": {"ideal": 1280}}, "audio": False},
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    async_processing=True,
+st.subheader(
+    f"2. Matching Build Codes ({len(filtered)})"
 )
 
-placeholder = st.empty()
-if ctx.video_processor:
-    while ctx.state.playing:
-        ctx.video_processor.update(target, known)
-        with ctx.video_processor.lock:
-            found = dict(ctx.video_processor.found)
-        if found:
-            placeholder.dataframe(
-                pd.DataFrame({"Build code": found.keys(), "Description": found.values()}),
-                use_container_width=True, hide_index=True)
-        else:
-            placeholder.info("No selected build code detected yet.")
-        time.sleep(0.5)
+st.dataframe(
+    filtered[
+        [code_col, "_description"]
+    ].rename(
+        columns={
+            "_description":
+            "Description"
+        }
+    ),
+    use_container_width=True,
+    hide_index=True
+)
+
+# ========================================================
+# TARGET CODES
+# ========================================================
+
+target_codes = filtered["_code"].tolist()
+
+all_codes = df["_code"].tolist()
+
+# ========================================================
+# CAMERA
+# ========================================================
+
+st.subheader("3. Scan Build Code")
+
+photo = st.camera_input(
+    "Take Photo"
+)
+
+# ========================================================
+# OCR
+# ========================================================
+
+if photo:
+
+    image = Image.open(photo)
+
+    st.image(
+        image,
+        caption="Captured Image"
+    )
+
+    image_np = np.array(image)
+
+    ocr = RapidOCR()
+
+    with st.spinner(
+        "Reading build code..."
+    ):
+
+        result, _ = ocr(image_np)
+
+    detected = []
+
+    if result:
+
+        for box, text, score in result:
+
+            clean_text = norm(text)
+
+            if len(clean_text) >= 10:
+
+                detected.append(clean_text)
+
+    st.subheader("Detected Text")
+
+    if detected:
+
+        for txt in detected:
+
+            st.write(txt)
+
+    else:
+
+        st.warning(
+            "No build code detected."
+        )
+
+    # ====================================================
+    # FIND BEST MATCH
+    # ====================================================
+
+    st.subheader("Best Match")
+
+    best_match_found = False
+
+    search_pool = (
+        target_codes
+        if len(target_codes) > 0
+        else all_codes
+    )
+
+    for text in detected:
+
+        match = process.extractOne(
+            text,
+            search_pool
+        )
+
+        if match:
+
+            matched_code = match[0]
+            confidence = match[1]
+
+            if confidence > 75:
+
+                best_match_found = True
+
+                st.success(
+                    f"Matched Build Code: {matched_code}"
+                )
+
+                st.write(
+                    f"Confidence: {confidence:.1f}%"
+                )
+
+                row = df[
+                    df["_code"]
+                    == matched_code
+                ].iloc[0]
+
+                st.markdown("### Test Configuration")
+
+                st.write(
+                    f"Vehicle: {row[desc_cols[0]]}"
+                )
+
+                st.write(
+                    f"Front/Rear: {row[desc_cols[1]]}"
+                )
+
+                st.write(
+                    f"RH/LH: {row[desc_cols[2]]}"
+                )
+
+                st.write(
+                    f"Disc Size: {row[desc_cols[3]]}"
+                )
+
+                st.write(
+                    f"Caliper Colour: {row[desc_cols[4]]}"
+                )
+
+                st.write(
+                    f"Extra Features: {row[desc_cols[5]]}"
+                )
+
+                st.info(
+                    row["_description"]
+                )
+
+    if not best_match_found:
+
+        st.error(
+            "No matching build code found."
+        )
